@@ -119,13 +119,38 @@ var workspaceDeleteCmd = &cobra.Command{
 
 		// Read the flags.
 		name := args[0]
+		force, _ := cmd.Flags().GetBool("force")
+		backup, _ := cmd.Flags().GetBool("backup")
 
-		// Delete the workspace.
-		if err := deleteWorkspace(client, organization, name); err != nil {
-			log.Fatalf("Cannot delete workspace %q: %s.", name, err)
+		w, err := readWorkspace(client, organization, name)
+		if err != nil {
+			log.Fatalf("Cannot read workspace %q: %s.", name, err)
 		}
 
-		log.Infof("Workspace %q deleted successfully.", name)
+		if backup && w.CurrentStateVersion != nil {
+			blob, err := client.StateVersions.Download(context.Background(), w.CurrentStateVersion.DownloadURL)
+			if err != nil {
+				log.Fatalf("Unable to backup state %q: %s", name, err)
+			}
+			backupName := fmt.Sprintf("%s.%s.%s.tfstate", w.Name, w.ID, w.CurrentStateVersion.ID)
+			err = os.WriteFile(backupName, blob, 0600)
+			if err != nil {
+				log.Fatalf("Unable to write backup of %s to %s: %s", name, backupName, err)
+			} else {
+				log.Printf("Wrote %s -> %s", name, backupName)
+			}
+		}
+
+		if !force && (w.ResourceCount > 0 || w.CurrentStateVersion != nil) {
+			log.Fatalf("Refusing to delete non-empty state, found %d resources in state %q", w.ResourceCount, w.CurrentStateVersion.ID)
+		}
+
+		// Delete the workspace.
+		if err := deleteWorkspaceByID(client, w.ID); err != nil {
+			log.Fatalf("Cannot delete workspace %q: %s.", name, w.ID, err)
+		}
+
+		log.Infof("Workspace %s (%q) deleted successfully.", name, w.ID)
 	},
 }
 
@@ -167,6 +192,8 @@ func init() {
 	// example: ot-8Xc1NTYpjIQZIwIh:organization/repository:master
 	workspaceCreateCmd.Flags().String("vcsrepository", "", "Specify a workspace's VCS repository")
 	workspaceCreateCmd.Flags().BoolP("force", "f", false, "Update workspace if it exists")
+	workspaceDeleteCmd.Flags().BoolP("force", "f", false, "Delete workspace if its non-empty")
+	workspaceDeleteCmd.Flags().BoolP("backup", "b", false, "Create backup of workspace if non-empty")
 }
 
 func readWorkspace(client *tfe.Client, organization, workspace string) (*tfe.Workspace, error) {
@@ -222,8 +249,8 @@ func listWorkspaces(client *tfe.Client, organization string) ([]*tfe.Workspace, 
 	return results, nil
 }
 
-func deleteWorkspace(client *tfe.Client, organization, workspace string) error {
-	if err := client.Workspaces.Delete(context.Background(), organization, workspace); err != nil {
+func deleteWorkspaceByID(client *tfe.Client, workspace string) error {
+	if err := client.Workspaces.DeleteByID(context.Background(), workspace); err != nil {
 		return err
 	}
 	return nil
